@@ -14,22 +14,18 @@
  */
 package com.pylonproducts.wifiwizard;
 
+import java.util.ArrayList;
+import android.Manifest;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.net.wifi.*;
+import android.util.Log;
 import org.apache.cordova.*;
-import java.util.List;
-
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import android.net.NetworkInfo;
-import android.net.wifi.WifiManager;
-import android.net.wifi.WifiConfiguration;
-import android.net.wifi.WifiEnterpriseConfig;
-import android.net.wifi.ScanResult;
-import android.net.wifi.WifiInfo;
-import android.net.wifi.SupplicantState;
-import android.content.Context;
-import android.util.Log;
+import java.util.List;
 
 
 public class WifiWizard extends CordovaPlugin {
@@ -47,21 +43,24 @@ public class WifiWizard extends CordovaPlugin {
     private static final String SET_WIFI_ENABLED = "setWifiEnabled";
     private static final String TAG = "WifiWizard";
 
+    private static final int PERMISSION_DENIED_ERROR = 20;
+    private static final int COARSE_LOCATION_SEC = 0;
+
+    private JSONArray scanResultData;
+
     private WifiManager wifiManager;
-    private CallbackContext callbackContext;
+    private ArrayList<CallbackContext> permissionCallbacks;
 
     @Override
     public void initialize(CordovaInterface cordova, CordovaWebView webView) {
         super.initialize(cordova, webView);
         this.wifiManager = (WifiManager) cordova.getActivity().getSystemService(Context.WIFI_SERVICE);
+		permissionCallbacks = new ArrayList<CallbackContext>();
     }
 
     @Override
     public boolean execute(String action, JSONArray data, CallbackContext callbackContext)
                             throws JSONException {
-
-        this.callbackContext = callbackContext;
-
         if(action.equals(IS_WIFI_ENABLED)) {
             return this.isWifiEnabled(callbackContext);
         }
@@ -91,7 +90,18 @@ public class WifiWizard extends CordovaPlugin {
             return this.startScan(callbackContext);
         }
         else if(action.equals(GET_SCAN_RESULTS)) {
-            return this.getScanResults(callbackContext, data);
+            if(!PermissionHelper.hasPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)) {
+				this.permissionCallbacks.add(callbackContext);
+				// Only allow a single permission request at a time
+				if (this.permissionCallbacks.size() <= 1) {
+					scanResultData = data;
+					PermissionHelper.requestPermission(this, COARSE_LOCATION_SEC, Manifest.permission.ACCESS_COARSE_LOCATION);
+					Log.d(TAG, "Location permission not found, requesting from user");
+				}
+                return true;
+            }else{
+                return this.getScanResults(callbackContext, data);
+            }
         }
         else if(action.equals(DISCONNECT)) {
             return this.disconnect(callbackContext);
@@ -114,87 +124,94 @@ public class WifiWizard extends CordovaPlugin {
      * @params data                JSON Array with [0] == SSID, [1] == password
      * @return true    if add successful, false if add fails
      */
-    private boolean addNetwork(CallbackContext callbackContext, JSONArray data) {
-        // Initialize the WifiConfiguration object
-        WifiConfiguration wifi = new WifiConfiguration();
+    private boolean addNetwork(final CallbackContext callbackContext, final JSONArray data) {
+        final WifiWizard that = this;
 
-        Log.d(TAG, "WifiWizard: addNetwork entered.");
+        cordova.getThreadPool().execute(new Runnable() {
+            public void run() {
+                // Initialize the WifiConfiguration object
+                WifiConfiguration wifi = new WifiConfiguration();
 
-        try {
-            // data's order for ANY object is 0: ssid, 1: authentication algorithm,
-            // 2+: authentication information.
-            String authType = data.getString(1);
+                Log.d(TAG, "WifiWizard: addNetwork entered.");
+
+                try {
+                    // data's order for ANY object is 0: ssid, 1: authentication algorithm,
+                    // 2+: authentication information.
+                    String authType = data.getString(1);
 
 
-            if (authType.equals("WPA")) {
-                // WPA Data format:
-                // 0: ssid
-                // 1: auth
-                // 2: password
-                String newSSID = data.getString(0);
-                wifi.SSID = newSSID;
-                String newPass = data.getString(2);
-                wifi.preSharedKey = newPass;
+                    if (authType.equals("WPA")) {
+                        // WPA Data format:
+                        // 0: ssid
+                        // 1: auth
+                        // 2: password
+                        String newSSID = data.getString(0);
+                        wifi.SSID = newSSID;
+                        String newPass = data.getString(2);
+                        wifi.preSharedKey = newPass;
 
-                wifi.status = WifiConfiguration.Status.ENABLED;
-                wifi.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
-                wifi.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
-                wifi.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
-                wifi.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.TKIP);
-                wifi.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
-                wifi.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
-                wifi.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
+                        wifi.status = WifiConfiguration.Status.ENABLED;
+                        wifi.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
+                        wifi.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
+                        wifi.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
+                        wifi.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.TKIP);
+                        wifi.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
+                        wifi.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
+                        wifi.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
 
-                wifi.networkId = ssidToNetworkId(newSSID);
+                        wifi.networkId = ssidToNetworkId(newSSID);
 
-                if ( wifi.networkId == -1 ) {
-                    wifiManager.addNetwork(wifi);
-                    callbackContext.success(newSSID + " successfully added.");
+                        if ( wifi.networkId == -1 ) {
+                            that.wifiManager.addNetwork(wifi);
+                            callbackContext.success(newSSID + " successfully added.");
+                        }
+                        else {
+                            that.wifiManager.updateNetwork(wifi);
+                            callbackContext.success(newSSID + " successfully updated.");
+                        }
+
+                        that.wifiManager.saveConfiguration();
+                        return;
+                    }
+                    else if (authType.equals("WEP")) {
+                        // TODO: connect/configure for WEP
+                        Log.d(TAG, "WEP unsupported.");
+                        callbackContext.error("WEP unsupported");
+                        return;
+                    }
+                    else if (authType.equals("NONE")) {
+                        String newSSID = data.getString(0);
+                        wifi.SSID = newSSID;
+                        wifi.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
+                        wifi.networkId = ssidToNetworkId(newSSID);
+
+                        if ( wifi.networkId == -1 ) {
+                            that.wifiManager.addNetwork(wifi);
+                            callbackContext.success(newSSID + " successfully added.");
+                        }
+                        else {
+                            that.wifiManager.updateNetwork(wifi);
+                            callbackContext.success(newSSID + " successfully updated.");
+                        }
+
+                        that.wifiManager.saveConfiguration();
+                        return;
+                    }
+                    // TODO: Add more authentications as necessary
+                    else {
+                        Log.d(TAG, "Wifi Authentication Type Not Supported.");
+                        callbackContext.error("Wifi Authentication Type Not Supported: " + authType);
+                        return;
+                    }
                 }
-                else {
-                    wifiManager.updateNetwork(wifi);
-                    callbackContext.success(newSSID + " successfully updated.");
+                catch (Exception e) {
+                    callbackContext.error(e.getMessage());
+                    Log.d(TAG,e.getMessage());
+                    return;
                 }
-
-                wifiManager.saveConfiguration();
-                return true;
             }
-            else if (authType.equals("WEP")) {
-                // TODO: connect/configure for WEP
-                Log.d(TAG, "WEP unsupported.");
-                callbackContext.error("WEP unsupported");
-                return false;
-            }
-            else if (authType.equals("NONE")) {
-                String newSSID = data.getString(0);
-                wifi.SSID = newSSID;
-                wifi.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
-                wifi.networkId = ssidToNetworkId(newSSID);
-
-                if ( wifi.networkId == -1 ) {
-                    wifiManager.addNetwork(wifi);
-                    callbackContext.success(newSSID + " successfully added.");
-                }
-                else {
-                    wifiManager.updateNetwork(wifi);
-                    callbackContext.success(newSSID + " successfully updated.");
-                }
-
-                wifiManager.saveConfiguration();
-                return true;
-            }
-            // TODO: Add more authentications as necessary
-            else {
-                Log.d(TAG, "Wifi Authentication Type Not Supported.");
-                callbackContext.error("Wifi Authentication Type Not Supported: " + authType);
-                return false;
-            }
-        }
-        catch (Exception e) {
-            callbackContext.error(e.getMessage());
-            Log.d(TAG,e.getMessage());
-            return false;
-        }
+        });
+        return true;
     }
 
     /**
@@ -245,42 +262,62 @@ public class WifiWizard extends CordovaPlugin {
      *    @param    data                JSON Array, with [0] being SSID to connect
      *    @return    true if network connected, false if failed
      */
-    private boolean connectNetwork(CallbackContext callbackContext, JSONArray data) {
-        Log.d(TAG, "WifiWizard: connectNetwork entered.");
-        if(!validateData(data)) {
-            callbackContext.error("WifiWizard: connectNetwork invalid data");
-            Log.d(TAG, "WifiWizard: connectNetwork invalid data.");
-            return false;
-        }
-        String ssidToConnect = "";
+    private boolean connectNetwork(final CallbackContext callbackContext, final JSONArray data) {
+		final WifiWizard that = this;
+		
+		cordova.getThreadPool().execute(new Runnable() {
+			public void run() {
+				Log.d(TAG, "WifiWizard: connectNetwork entered.");
+				if(!that.validateData(data)) {
+					callbackContext.error("WifiWizard: connectNetwork invalid data");
+					Log.d(TAG, "WifiWizard: connectNetwork invalid data.");
+					return;
+				}
+				String ssidToConnect = "";
 
-        try {
-            ssidToConnect = data.getString(0);
-        }
-        catch (Exception e) {
-            callbackContext.error(e.getMessage());
-            Log.d(TAG, e.getMessage());
-            return false;
-        }
+				try {
+					ssidToConnect = data.getString(0);
+				}
+				catch (Exception e) {
+					callbackContext.error(e.getMessage());
+					Log.d(TAG, e.getMessage());
+					return;
+				}
 
-        int networkIdToConnect = ssidToNetworkId(ssidToConnect);
+				int networkIdToConnect = ssidToNetworkId(ssidToConnect);
 
-        if (networkIdToConnect >= 0) {
-            // We disable the network before connecting, because if this was the last connection before
-            // a disconnect(), this will not reconnect.
-            wifiManager.disableNetwork(networkIdToConnect);
-            wifiManager.enableNetwork(networkIdToConnect, true);
+				if (networkIdToConnect >= 0) {
+					// We disable the network before connecting, because if this was the last connection before
+					// a disconnect(), this will not reconnect.
+					wifiManager.disableNetwork(networkIdToConnect);
+					wifiManager.enableNetwork(networkIdToConnect, true);
 
-            SupplicantState supState;
-            WifiInfo wifiInfo = wifiManager.getConnectionInfo();
-            supState = wifiInfo.getSupplicantState();
-            callbackContext.success(supState.toString());
-            return true;
-
-        }else{
-            callbackContext.error("WifiWizard: cannot connect to network");
-            return false;
-        }
+					// Wait until we are actually connected
+					// Try 30 times with 250ms sleeps, for a total of 7.5 second long attempt
+					for (int i = 0; i <= 30; i++) {
+                        WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+                        if (wifiInfo.getNetworkId() == networkIdToConnect) {
+                            callbackContext.success(wifiInfo.getSupplicantState().toString());
+                            return;
+                        }
+                        try {
+                            Thread.sleep(250);
+                        } catch (Exception e) {
+                            Log.d(TAG, e.getMessage());
+                            callbackContext.error(e.getMessage());
+							return;
+                        }
+					}
+                    Log.d(TAG, "ConnectNetwork: Timed out");
+                    callbackContext.error("ConnectNetwork: Timed out");
+					return;
+				} else {
+					callbackContext.error("WifiWizard: cannot connect to network");
+					return;
+				}
+			}
+		});
+		return true;
     }
 
     /**
@@ -370,77 +407,104 @@ public class WifiWizard extends CordovaPlugin {
        *    @param    data                   JSONArray with [0] == JSONObject
        *    @return    true
        */
-    private boolean getScanResults(CallbackContext callbackContext, JSONArray data) {
-        List<ScanResult> scanResults = wifiManager.getScanResults();
+    private boolean getScanResults(final CallbackContext callbackContext, final JSONArray data) {
+        final WifiWizard that = this;
+		final ArrayList<CallbackContext> ccs = new ArrayList<CallbackContext>();
+		ccs.add(callbackContext);
 
-        JSONArray returnList = new JSONArray();
-
-        Integer numLevels = null;
-
-        if(!validateData(data)) {
-            callbackContext.error("WifiWizard: disconnectNetwork invalid data");
-            Log.d(TAG, "WifiWizard: disconnectNetwork invalid data");
-            return false;
-        }else if (!data.isNull(0)) {
-            try {
-                JSONObject options = data.getJSONObject(0);
-
-                if (options.has("numLevels")) {
-                    Integer levels = options.optInt("numLevels");
-
-                    if (levels > 0) {
-                        numLevels = levels;
-                    } else if (options.optBoolean("numLevels", false)) {
-                        // use previous default for {numLevels: true}
-                        numLevels = 5;
-                    }
-                }
-            } catch (JSONException e) {
-                e.printStackTrace();
-                callbackContext.error(e.toString());
-                return false;
+        cordova.getThreadPool().execute(new Runnable() {
+            public void run() {
+                that._getScanResults(ccs, data);
             }
-        }
-
-        for (ScanResult scan : scanResults) {
-            /*
-             * @todo - breaking change, remove this notice when tidying new release and explain changes, e.g.:
-             *   0.y.z includes a breaking change to WifiWizard.getScanResults().
-             *   Earlier versions set scans' level attributes to a number derived from wifiManager.calculateSignalLevel.
-             *   This update returns scans' raw RSSI value as the level, per Android spec / APIs.
-             *   If your application depends on the previous behaviour, we have added an options object that will modify behaviour:
-             *   - if `(n == true || n < 2)`, `*.getScanResults({numLevels: n})` will return data as before, split in 5 levels;
-             *   - if `(n > 1)`, `*.getScanResults({numLevels: n})` will calculate the signal level, split in n levels;
-             *   - if `(n == false)`, `*.getScanResults({numLevels: n})` will use the raw signal level;
-             */
-
-            int level;
-
-            if (numLevels == null) {
-              level = scan.level;
-            } else {
-              level = wifiManager.calculateSignalLevel(scan.level, numLevels);
-            }
-
-            JSONObject lvl = new JSONObject();
-            try {
-                lvl.put("level", level);
-                lvl.put("SSID", scan.SSID);
-                lvl.put("BSSID", scan.BSSID);
-                lvl.put("frequency", scan.frequency);
-                lvl.put("capabilities", scan.capabilities);
-               // lvl.put("timestamp", scan.timestamp);
-                returnList.put(lvl);
-            } catch (JSONException e) {
-                e.printStackTrace();
-                callbackContext.error(e.toString());
-                return false;
-            }
-        }
-
-        callbackContext.success(returnList);
+        });
         return true;
     }
+	private boolean getScanResults() {
+        final WifiWizard that = this;
+		final JSONArray data = that.scanResultData;
+
+        cordova.getThreadPool().execute(new Runnable() {
+            public void run() {
+                that._getScanResults(that.permissionCallbacks, data);
+				that.permissionCallbacks.clear();
+            }
+        });
+        return true;
+    }
+	
+	private void _getScanResults(ArrayList<CallbackContext> ccs, JSONArray data) {
+		List<ScanResult> scanResults = wifiManager.getScanResults();
+
+		JSONArray returnList = new JSONArray();
+
+		Integer numLevels = null;
+
+		if(!validateData(data)) {
+			for (CallbackContext c : ccs)
+				c.error("WifiWizard: getScanResults invalid data");
+			Log.d(TAG, "WifiWizard: getScanResults invalid data");
+			return;
+		}else if (!data.isNull(0)) {
+			try {
+				JSONObject options = data.getJSONObject(0);
+
+				if (options.has("numLevels")) {
+					Integer levels = options.optInt("numLevels");
+
+					if (levels > 0) {
+						numLevels = levels;
+					} else if (options.optBoolean("numLevels", false)) {
+						// use previous default for {numLevels: true}
+						numLevels = 5;
+					}
+				}
+			} catch (JSONException e) {
+				e.printStackTrace();
+				for (CallbackContext c : ccs)
+					c.error(e.toString());
+				return;
+			}
+		}
+
+		for (ScanResult scan : scanResults) {
+			/*
+			 * @todo - breaking change, remove this notice when tidying new release and explain changes, e.g.:
+			 *   0.y.z includes a breaking change to WifiWizard.getScanResults().
+			 *   Earlier versions set scans' level attributes to a number derived from wifiManager.calculateSignalLevel.
+			 *   This update returns scans' raw RSSI value as the level, per Android spec / APIs.
+			 *   If your application depends on the previous behaviour, we have added an options object that will modify behaviour:
+			 *   - if `(n == true || n < 2)`, `*.getScanResults({numLevels: n})` will return data as before, split in 5 levels;
+			 *   - if `(n > 1)`, `*.getScanResults({numLevels: n})` will calculate the signal level, split in n levels;
+			 *   - if `(n == false)`, `*.getScanResults({numLevels: n})` will use the raw signal level;
+			 */
+
+			int level;
+
+			if (numLevels == null) {
+			  level = scan.level;
+			} else {
+			  level = wifiManager.calculateSignalLevel(scan.level, numLevels);
+			}
+
+			JSONObject lvl = new JSONObject();
+			try {
+				lvl.put("level", level);
+				lvl.put("SSID", scan.SSID);
+				lvl.put("BSSID", scan.BSSID);
+				lvl.put("frequency", scan.frequency);
+				lvl.put("capabilities", scan.capabilities);
+			   // lvl.put("timestamp", scan.timestamp);
+				returnList.put(lvl);
+			} catch (JSONException e) {
+				e.printStackTrace();
+				for (CallbackContext c : ccs)
+					c.error(e.toString());
+				return;
+			}
+		}
+		for (CallbackContext c : ccs)
+			c.success(returnList);
+	}
 
     /**
        *    This method uses the callbackContext.success method. It starts a wifi scanning
@@ -487,7 +551,7 @@ public class WifiWizard extends CordovaPlugin {
             return false;
         }
 
-        callbackContext.success(ssid);
+        callbackContext.success(ssid.replace("\"", ""));
         return true;
     }
 
@@ -527,8 +591,8 @@ public class WifiWizard extends CordovaPlugin {
      */
     private boolean setWifiEnabled(CallbackContext callbackContext, JSONArray data) {
         if(!validateData(data)) {
-            callbackContext.error("WifiWizard: disconnectNetwork invalid data");
-            Log.d(TAG, "WifiWizard: disconnectNetwork invalid data");
+            callbackContext.error("WifiWizard: setWifiEnabled invalid data");
+            Log.d(TAG, "WifiWizard: setWifiEnabled invalid data");
             return false;
         }
         
@@ -556,15 +620,34 @@ public class WifiWizard extends CordovaPlugin {
     private boolean validateData(JSONArray data) {
         try {
             if (data == null || data.get(0) == null) {
-                callbackContext.error("Data is null.");
                 return false;
             }
             return true;
         }
         catch (Exception e) {
-            callbackContext.error(e.getMessage());
         }
         return false;
+    }
+
+    public void onRequestPermissionResult(int requestCode, String[] permissions,
+                                          int[] grantResults) throws JSONException {
+        for (int r : grantResults) {
+            if (r == PackageManager.PERMISSION_DENIED) {
+				PluginResult res = new PluginResult(PluginResult.Status.ERROR, PERMISSION_DENIED_ERROR);
+				for (CallbackContext c : this.permissionCallbacks)
+					c.sendPluginResult(res);
+				this.permissionCallbacks.clear();
+                return;
+            }
+        }
+
+        switch (requestCode) {
+            case COARSE_LOCATION_SEC:
+                Log.d(TAG, "Location permission granted, returning scan results");
+                this.getScanResults();
+                this.scanResultData = null;
+                break;
+        }
     }
 
 }
