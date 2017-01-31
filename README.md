@@ -1,5 +1,13 @@
 # WifiWizard
 
+Version 0.2.12
+-Fixed some issues with sending a second callback, particularly on invalid data
+-Fixed permission requesting on Android M
+-Ensures only a single permission request occurs at once
+-connectNetwork only resolves when actually connected
+-getScanREsults, addNetwork, connectNetwork now run on different thread
+
+
 Version 0.2.10
 
 `getCurrentBSSID` now available on IOS.
