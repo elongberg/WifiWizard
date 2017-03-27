@@ -14,6 +14,13 @@
  */
 package com.pylonproducts.wifiwizard;
 
+import android.net.ConnectivityManager;
+import android.net.NetworkRequest;
+import android.net.Network;
+import android.net.NetworkInfo;
+import android.net.NetworkCapabilities;
+import android.os.Build;
+
 import java.util.ArrayList;
 import android.Manifest;
 import android.content.Context;
@@ -41,6 +48,8 @@ public class WifiWizard extends CordovaPlugin {
     private static final String GET_CONNECTED_SSID = "getConnectedSSID";
     private static final String IS_WIFI_ENABLED = "isWifiEnabled";
     private static final String SET_WIFI_ENABLED = "setWifiEnabled";
+	private static final String ENFORCE_USE_WIFI = "enforceUseWifi";
+	private static final String GET_VERSION_SDK = "getVersionSDK";
     private static final String TAG = "WifiWizard";
 
     private static final int PERMISSION_DENIED_ERROR = 20;
@@ -51,11 +60,15 @@ public class WifiWizard extends CordovaPlugin {
     private WifiManager wifiManager;
     private ArrayList<CallbackContext> permissionCallbacks;
 
+	private ConnectivityManager conMan;
+	private boolean hasRequestNetwork = false;
+
     @Override
     public void initialize(CordovaInterface cordova, CordovaWebView webView) {
         super.initialize(cordova, webView);
         this.wifiManager = (WifiManager) cordova.getActivity().getSystemService(Context.WIFI_SERVICE);
 		permissionCallbacks = new ArrayList<CallbackContext>();
+		this.conMan = (ConnectivityManager)cordova.getActivity().getSystemService(Context.CONNECTIVITY_SERVICE);
     }
 
     @Override
@@ -67,6 +80,9 @@ public class WifiWizard extends CordovaPlugin {
         else if(action.equals(SET_WIFI_ENABLED)) {
             return this.setWifiEnabled(callbackContext, data);
         }
+		else if (action.equals(GET_VERSION_SDK)) {
+			return this.getVersionSDK(callbackContext);
+		}
         else if (!wifiManager.isWifiEnabled()) {
             callbackContext.error("Wifi is not enabled.");
             return false;
@@ -109,6 +125,9 @@ public class WifiWizard extends CordovaPlugin {
         else if(action.equals(GET_CONNECTED_SSID)) {
             return this.getConnectedSSID(callbackContext);
         }
+		else if (action.equals(ENFORCE_USE_WIFI)) {
+			return this.enforceUseWifi(callbackContext);
+		}
         else {
             callbackContext.error("Incorrect action parameter: " + action);
         }
@@ -263,16 +282,17 @@ public class WifiWizard extends CordovaPlugin {
      *    @return    true if network connected, false if failed
      */
     private boolean connectNetwork(final CallbackContext callbackContext, final JSONArray data) {
+		if(!this.validateData(data)) {
+			callbackContext.error("WifiWizard: connectNetwork invalid data");
+			Log.d(TAG, "WifiWizard: connectNetwork invalid data.");
+			return false;
+		}
 		final WifiWizard that = this;
-		
+
 		cordova.getThreadPool().execute(new Runnable() {
 			public void run() {
 				Log.d(TAG, "WifiWizard: connectNetwork entered.");
-				if(!that.validateData(data)) {
-					callbackContext.error("WifiWizard: connectNetwork invalid data");
-					Log.d(TAG, "WifiWizard: connectNetwork invalid data.");
-					return;
-				}
+
 				String ssidToConnect = "";
 
 				try {
@@ -287,29 +307,62 @@ public class WifiWizard extends CordovaPlugin {
 				int networkIdToConnect = ssidToNetworkId(ssidToConnect);
 
 				if (networkIdToConnect >= 0) {
-					// We disable the network before connecting, because if this was the last connection before
-					// a disconnect(), this will not reconnect.
-					wifiManager.disableNetwork(networkIdToConnect);
-					wifiManager.enableNetwork(networkIdToConnect, true);
-
+					if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !that.hasRequestNetwork) {
+                        // If network has no internet access, this is required to ensure communication goes through it.
+                        // This isn't needed for certain android distributions, and on others this still doesn't help
+                        // when there is a known internet-ready wifi network available (the system auto-connects to that).
+						// Periodically calling this function can help with that, however.
+						that.hasRequestNetwork = true;
+                        NetworkRequest.Builder req = new NetworkRequest.Builder();
+                        req.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
+                        conMan.requestNetwork(req.build(), new ConnectivityManager.NetworkCallback() {
+                            boolean succeeded = false;
+                            Network curNetwork = null;
+                            @Override
+                            public void onAvailable(Network network) {
+                                if (!succeeded) {
+                                    succeeded = true;
+                                    curNetwork = network;
+                                    Log.d(TAG, "Wifi network available, binding... " + network);
+                                    conMan.bindProcessToNetwork(network);
+                                }
+                            }
+                            @Override
+                            public void onLost(Network network) {
+                                if (network.equals(curNetwork)) {
+                                    Log.d(TAG, "Lost current network");
+                                    conMan.bindProcessToNetwork(null);
+                                    succeeded = false;
+                                }
+                            }
+                        });
+                    }
+				    // Check if already connected
+                    WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+                    if (wifiInfo.getNetworkId() == networkIdToConnect) {
+                        callbackContext.success(wifiInfo.getSupplicantState().toString());
+                        return;
+                    }
 					// Wait until we are actually connected
 					// Try 30 times with 250ms sleeps, for a total of 7.5 second long attempt
 					for (int i = 0; i <= 30; i++) {
-                        WifiInfo wifiInfo = wifiManager.getConnectionInfo();
-                        if (wifiInfo.getNetworkId() == networkIdToConnect) {
-                            callbackContext.success(wifiInfo.getSupplicantState().toString());
-                            return;
-                        }
-                        try {
-                            Thread.sleep(250);
-                        } catch (Exception e) {
-                            Log.d(TAG, e.getMessage());
-                            callbackContext.error(e.getMessage());
+						Log.d(TAG, "Enable network: " + wifiManager.enableNetwork(networkIdToConnect, true));
+						wifiInfo = wifiManager.getConnectionInfo();
+						if (wifiInfo.getNetworkId() == networkIdToConnect) {
+							Log.d(TAG, "Wifi connected");
+							callbackContext.success(wifiInfo.getSupplicantState().toString());
 							return;
-                        }
+						}
+						try {
+							Thread.sleep(250);
+						} catch (Exception e) {
+							Log.d(TAG, e.getMessage());
+							callbackContext.error(e.getMessage());
+							return;
+						}
 					}
-                    Log.d(TAG, "ConnectNetwork: Timed out");
-                    callbackContext.error("ConnectNetwork: Timed out");
+					Log.d(TAG, "ConnectNetwork: Timed out");
+					callbackContext.error("ConnectNetwork: Timed out");
 					return;
 				} else {
 					callbackContext.error("WifiWizard: cannot connect to network");
@@ -431,7 +484,7 @@ public class WifiWizard extends CordovaPlugin {
         });
         return true;
     }
-	
+
 	private void _getScanResults(ArrayList<CallbackContext> ccs, JSONArray data) {
 		List<ScanResult> scanResults = wifiManager.getScanResults();
 
@@ -595,9 +648,9 @@ public class WifiWizard extends CordovaPlugin {
             Log.d(TAG, "WifiWizard: setWifiEnabled invalid data");
             return false;
         }
-        
+
         String status = "";
-        
+
         try {
             status = data.getString(0);
         }
@@ -606,16 +659,50 @@ public class WifiWizard extends CordovaPlugin {
             Log.d(TAG, e.getMessage());
             return false;
         }
-        
+
         if (wifiManager.setWifiEnabled(status.equals("true"))) {
             callbackContext.success();
             return true;
-        } 
+        }
         else {
             callbackContext.error("Cannot enable wifi");
             return false;
         }
     }
+
+	/**
+	 * Enforce the use of an available Wi-Fi connection, instead of e.g. mobile data.
+	 * Useful in M and above.
+	 * Never sends a callback error.
+	 */
+	private boolean enforceUseWifi(final CallbackContext callbackContext) {
+		if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+			callbackContext.success();
+			return true;
+		}
+		else {
+			NetworkRequest.Builder req = new NetworkRequest.Builder();
+			req.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
+			conMan.requestNetwork(req.build(), new ConnectivityManager.NetworkCallback() {
+				boolean succeeded = false;
+				@Override
+				public void onAvailable(Network network) {
+					if (!succeeded) {
+						succeeded = true;
+						Log.d(TAG, "Wifi network available, binding.");
+						Log.d(TAG, "Binding success: " + conMan.bindProcessToNetwork(network));
+						callbackContext.success();
+					}
+				}
+			});
+		}
+		return true;
+	}
+	
+	private boolean getVersionSDK(CallbackContext callbackContext) {
+		callbackContext.success(Build.VERSION.SDK_INT);
+		return true;
+	}
 
     private boolean validateData(JSONArray data) {
         try {

@@ -1,5 +1,8 @@
 # WifiWizard
 
+Version 0.2.13
+-Android M+: binds all traffic to wifi network on connectNetwork called
+
 Version 0.2.12
 -Fixed some issues with sending a second callback, particularly on invalid data
 -Fixed permission requesting on Android M

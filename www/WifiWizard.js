@@ -289,7 +289,28 @@ var WifiWizard = {
             return;
         }
         cordova.exec(win, fail, 'WifiWizard', 'setWifiEnabled', [enabled]);
-    }
+    },
+	
+	/**
+	* Enforces the use of Wi-Fi, useful for connecting to Wi-Fi with no internet access.
+	* Will cause an error in iOS.
+	*/
+	enforceUseWifi: function(win, fail) {
+		if (typeof win != "function") {
+            win = function(){};
+        }
+        if (typeof fail != "function") {
+            fail = function(){};
+        }
+		cordova.exec(win, fail, 'WifiWizard', 'enforceUseWifi', []);
+	},
+	
+	/**
+	* Get android sdk version, e.g. 22
+	*/
+	getVersionSDK: function(win) {
+		cordova.exec(win, function(){}, 'WifiWizard', 'getVersionSDK', []);
+	}
 };
 
 module.exports = WifiWizard;
